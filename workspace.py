@@ -9,8 +9,72 @@ import numpy as np
 from shapely.geometry import MultiPolygon, Point
 from shapely.ops import polygonize, unary_union
 
+def build_workspace_3(arm):
+    """Build the joint-limited workspace for a 3-link arm as a Shapely polygon."""
+    q1_min, q1_max = arm.limits1
+    q2_min, q2_max = arm.limits2
+    q3_min, q3_max = arm.limits3
 
-def build_workspace(arm):
+    q2_extremes = [q2_min, q2_max]
+    for special in (0.0, np.pi, -np.pi):
+        if q2_min < special < q2_max:
+            q2_extremes.append(special)
+
+    q3_extremes = [q3_min, q3_max]
+    for special in (0.0, np.pi, -np.pi):
+        if q3_min < special < q3_max:
+            q3_extremes.append(special)
+
+    raw_circles = []
+
+    # 1. Sweep q1: circles centered at origin (0, 0)
+    for q2 in q2_extremes:
+        for q3 in q3_extremes:
+            r = np.hypot(
+                arm.l1 + arm.l2 * np.cos(q2) + arm.l3 * np.cos(q2 + q3),
+                arm.l2 * np.sin(q2) + arm.l3 * np.sin(q2 + q3),
+            )
+            raw_circles.append((0.0, 0.0, r))
+
+    # 2 & 3. Lock q1 at limits: circles centered at elbow 1 and elbow 2
+    for q1 in (q1_min, q1_max):
+        cx1, cy1 = arm.l1 * np.cos(q1), arm.l1 * np.sin(q1)
+        for q3 in q3_extremes:
+            r = np.hypot(arm.l2 + arm.l3 * np.cos(q3), arm.l3 * np.sin(q3))
+            raw_circles.append((cx1, cy1, r))
+
+        for q2 in q2_extremes:
+            cx2 = cx1 + arm.l2 * np.cos(q1 + q2)
+            cy2 = cy1 + arm.l2 * np.sin(q1 + q2)
+            raw_circles.append((cx2, cy2, arm.l3))
+
+    # Filter out zero-radius and duplicate circles
+    circles = []
+    for cx, cy, r in raw_circles:
+        if r <= 1e-7:
+            continue
+        if not any(
+            np.hypot(cx - ucx, cy - ucy) < 1e-6 and abs(r - ur) < 1e-6
+            for ucx, ucy, ur in circles
+        ):
+            circles.append((cx, cy, r))
+
+    rings = [
+        Point(cx, cy).buffer(r).exterior
+        for cx, cy, r in circles
+    ]
+    noded_lines = unary_union(rings)
+    faces = [
+        face
+        for face in polygonize(noded_lines)
+        if arm.is_reachable(
+            face.representative_point().x, face.representative_point().y
+        )
+    ]
+
+    return unary_union(faces), circles
+
+def build_workspace_2(arm):
     """Build the joint-limited workspace as a Shapely polygon.
 
     Boundary circles come from the joint limits and link lengths. They are
@@ -56,9 +120,9 @@ def build_workspace(arm):
     return unary_union(faces), circles
 
 
-def plot_workspace(ax, arm):
+def plot_workspace_2(ax, arm):
     """Draw reachable faces in white and unreachable space in light gray."""
-    workspace, _ = build_workspace(arm)
+    workspace, _ = build_workspace_2(arm)
 
     polys = workspace.geoms if isinstance(workspace, MultiPolygon) else [workspace]
 
@@ -76,6 +140,31 @@ def plot_workspace(ax, arm):
             ax.plot(x_int, y_int, color='lightgray')
 
     max_reach = arm.l1 + arm.l2
+    ax.set_xlim(-max_reach * 1.15, max_reach * 1.15)
+    ax.set_ylim(-max_reach * 1.15, max_reach * 1.15)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+
+def plot_workspace_3(ax, arm):
+    """Draw reachable faces in white and unreachable space in light gray."""
+    workspace, _ = build_workspace_3(arm)
+
+    polys = workspace.geoms if isinstance(workspace, MultiPolygon) else [workspace]
+
+    ax.set_facecolor('lightgray')
+    for poly in polys:
+        if poly.is_empty:
+            continue
+        x_ext, y_ext = poly.exterior.xy
+        ax.fill(x_ext, y_ext, color='white', label='Workspace')
+        ax.plot(x_ext, y_ext, color='white')
+
+        for interior in poly.interiors:
+            x_int, y_int = interior.xy
+            ax.fill(x_int, y_int, color='lightgray')
+            ax.plot(x_int, y_int, color='lightgray')
+
+    max_reach = arm.l1 + arm.l2 + arm.l3
     ax.set_xlim(-max_reach * 1.15, max_reach * 1.15)
     ax.set_ylim(-max_reach * 1.15, max_reach * 1.15)
     ax.set_aspect('equal')
